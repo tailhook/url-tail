@@ -1,0 +1,67 @@
+commands:
+
+  run: !Command
+    description: Run url-tail command
+    container: ubuntu
+    prerequisites: [make]
+    run: [./target/debug/url-tail]
+
+  cargo: !Command
+    description: Run any cargo command
+    container: ubuntu
+    symlink-name: cargo
+    run: [cargo]
+
+  test-rustls: !Command
+    description: Run cargo tests with rustls tls implementation
+    container: ubuntu
+    run:
+    - cargo
+    - test
+    - --no-default-features
+    - --features=tls_rustls
+
+  test-notls: !Command
+    description: Run cargo tests without tls
+    container: ubuntu
+    run:
+    - cargo
+    - test
+    - --no-default-features
+
+  test: !Command
+    description: Run cargo tests
+    container: ubuntu
+    prerequisites: [test-rustls, test-notls]
+    run:
+    - cargo
+    - test
+
+  make: !Command
+    description: Build the library
+    container: ubuntu
+    run: [cargo, build]
+
+  _bulk: !Command
+    description: Run `bulk` command (for version bookkeeping)
+    container: ubuntu
+    run: [bulk]
+
+containers:
+
+  ubuntu:
+    setup:
+    - !Ubuntu xenial
+    - !Install [ca-certificates, build-essential, vim, pkg-config, libssl-dev]
+    - !TarInstall
+      url: "https://static.rust-lang.org/dist/rust-1.21.0-x86_64-unknown-linux-gnu.tar.gz"
+      script: "./install.sh --prefix=/usr \
+               --components=rustc,rust-std-x86_64-unknown-linux-gnu,cargo"
+    - &bulk !Tar
+      url: "https://github.com/tailhook/bulk/releases/download/v0.4.9/bulk-v0.4.9.tar.gz"
+      sha256: 23471a9986274bb4b7098c03e2eb7e1204171869b72c45385fcee1c64db2d111
+      path: /
+
+    environ:
+      HOME: /work/target
+      USER: pc
