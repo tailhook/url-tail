@@ -5,8 +5,8 @@ Url Tail
 [Crate](https://crates.io/crates/url-tail)
 
 
-An utility to stream log file from an HTTP enpoint. This is a similar to
-unixy `tail`` utility, but fetches data from HTTP instead of local file.
+An utility to stream log file from an HTTP(s) enpoint. This is a similar to
+unixy `tail` utility, but fetches data from HTTP(s) instead of local file.
 
 
 License
