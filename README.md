@@ -1,8 +1,6 @@
 Url Tail
 ========
 
-:Status: Beta
-
 [Github](https://github.com/tailhook/url-tail) |
 [Crate](https://crates.io/crates/url-tail)
 
