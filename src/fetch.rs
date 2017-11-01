@@ -1,24 +1,57 @@
+use std::io::{self, Write};
+use std::cmp::min;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
-use std::sync::{Arc, Mutex};
-use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
+use std::str::from_utf8;
+use std::sync::{Arc, Mutex};
+use std::time::{Instant, Duration};
 
 use abstract_ns::Address;
 use futures::{Sink, Async, Stream};
 use futures::future::{Future, join_all, ok, FutureResult};
 use tokio_core::net::TcpStream;
-use tk_easyloop::{spawn, handle};
+use tokio_core::reactor::Timeout;
+use tk_easyloop::{spawn, handle, timeout_at};
 use tk_http::{Version, Status};
 use tk_http::client::{Proto, Config, Error, Codec};
 use tk_http::client::{Encoder, EncoderDone, Head, RecvMode};
-use tk_http::client::buffered::Buffered;
 use url::Url;
 use ns_router::Router;
+
 
 #[cfg(feature="tls_native")] use native_tls::TlsConnector;
 #[cfg(feature="tls_native")] use tokio_tls::TlsConnectorExt;
 #[cfg(feature="tls_rustls")] use rustls::ClientConfig;
 #[cfg(feature="tls_rustls")] use tokio_rustls::ClientConfigExt;
+
+use forwarder::Forwarder;
+
+
+#[derive(Debug)]
+struct State {
+    offset: u64,
+    eof: u32,
+    last_line: Vec<u8>,
+    last_request: Instant,
+}
+
+#[derive(Debug)]
+struct Cursor {
+    url: Arc<Url>,
+    state: Option<State>,
+}
+
+struct Requests {
+    cursors: VecDeque<Arc<Mutex<Cursor>>>,
+    timeout: Timeout,
+}
+
+#[derive(Debug)]
+pub struct Request {
+    cursor: Arc<Mutex<Cursor>>,
+    range: Option<(u64, u64, u64)>,
+}
 
 pub fn group_addrs(vec: Vec<(Address, Vec<Arc<Url>>)>)
     -> HashMap<SocketAddr, Vec<Arc<Url>>>
@@ -50,7 +83,9 @@ pub fn group_addrs(vec: Vec<(Address, Vec<Arc<Url>>)>)
 
 pub fn http(resolver: &Router, urls_by_host: HashMap<String, Vec<Arc<Url>>>) {
     let resolver = resolver.clone();
-    let cfg = Config::new().done();
+    let cfg = Config::new()
+        .keep_alive_timeout(Duration::new(25, 0))
+        .done();
     spawn(
         join_all(urls_by_host.into_iter().map(move |(host, list)| {
             resolver.resolve_auto(&host, 80).map(|ips| (ips, list))
@@ -154,40 +189,89 @@ pub fn https(resolver: &Router, urls_by_host: HashMap<String, Vec<Arc<Url>>>) {
         }));
 }
 
-struct Cursor {
-    offset: Option<u64>,
-}
-
-struct Requests {
-
+fn request(cur: &Arc<Mutex<Cursor>>) -> Result<Request, Instant> {
+    let intr = cur.lock().unwrap();
+    match intr.state {
+        None => return Ok(Request {
+            cursor: cur.clone(),
+            range: None,
+        }),
+        Some(ref state) => {
+            if state.eof == 0 {
+                return Ok(Request {
+                    cursor: cur.clone(),
+                    range: None,
+                });
+            }
+            let next = state.last_request +
+                Duration::from_millis(
+                    min(100 * (2 << min(state.eof, 10)), 15000));
+            if next < Instant::now() {
+                return Ok(Request {
+                    cursor: cur.clone(),
+                    range: None,
+                });
+            }
+            return Err(next);
+        }
+    }
 }
 
 impl Requests {
     fn new(urls: Vec<Arc<Url>>) -> Requests {
-        unimplemented!();
+        Requests {
+            cursors: urls.into_iter().map(|u| Arc::new(Mutex::new(Cursor {
+                url: u,
+                state: None,
+            }))).collect(),
+            timeout: timeout_at(Instant::now()),
+        }
     }
-}
-
-pub struct Request {
-    url: Arc<Url>,
-    cursor: Arc<Mutex<Cursor>>,
 }
 
 impl Stream for Requests {
     type Item = Request;
     type Error = ();
     fn poll(&mut self) -> Result<Async<Option<Request>>, ()> {
-        unimplemented!();
+        loop {
+            match self.timeout.poll().unwrap() {
+                Async::Ready(()) => {}
+                Async::NotReady => return Ok(Async::NotReady),
+            }
+            let mut min_time = Instant::now() + Duration::new(7, 0);
+            for _ in 0..self.cursors.len() {
+                let cur = self.cursors.pop_front().unwrap();
+                let req = request(&cur);
+                self.cursors.push_back(cur);
+                match req {
+                    Ok(req) => return Ok(Async::Ready(Some(req))),
+                    Err(time) if min_time > time => min_time = time,
+                    Err(_) => {}
+                }
+            }
+            self.timeout = timeout_at(min_time);
+        }
     }
 }
 
 impl<S> Codec<S> for Request {
     type Future = FutureResult<EncoderDone<S>, Error>;
     fn start_write(&mut self, mut e: Encoder<S>) -> Self::Future {
-        e.request_line("GET", self.url.path(), Version::Http11);
-        self.url.host_str().map(|x| {
+        let cur = self.cursor.lock().unwrap();
+        e.request_line("GET", cur.url.path(), Version::Http11);
+        cur.url.host_str().map(|x| {
             e.add_header("Host", x).unwrap();
         });
+        match cur.state {
+            Some(State { offset, .. }) => {
+                e.format_header("Range",
+                    format_args!("bytes={}-{}",
+                        offset-1, offset+65535)).unwrap();
+            }
+            None => {
+                e.add_header("Range", "bytes=-4096").unwrap();
+            }
+        }
         e.done_headers().unwrap();
         ok(e.done())
     }
@@ -195,14 +279,63 @@ impl<S> Codec<S> for Request {
         let status = headers.status();
         // TODO(tailhook) better error
         assert_eq!(Some(Status::PartialContent), status);
+        for (name, value) in headers.headers() {
+            if name == "Content-Range" {
+                let str_value = from_utf8(value)
+                    .expect("valid content-range header");
+                if !str_value.starts_with("bytes ") {
+                    panic!("invalid content-range header");
+                }
+                let slash = str_value.find("/")
+                    .expect("valid content-range header");
+                let dash = str_value[..slash].find("-")
+                    .expect("valid content-range header");
+                let from = str_value[6..dash].parse::<u64>()
+                    .expect("valid content-range header");
+                let to = str_value[dash+1..slash].parse::<u64>()
+                    .expect("valid content-range header");
+                let total = str_value[slash+1..].parse::<u64>()
+                    .expect("valid content-range header");
+                self.range = Some((from, to, total));
+            }
+        }
         Ok(RecvMode::buffered(65536))
     }
     fn data_received(&mut self, data: &[u8], end: bool)
         -> Result<Async<usize>, Error>
     {
         assert!(end);
-        println!("Data {:?}", data);
-        Ok(Async::Ready(data.len()))
+        let consumed = data.len();
+        let (from, to, total) = self.range.unwrap();
+        let mut cur = self.cursor.lock().unwrap();
+        let (pos, eof, mut last_line) = match cur.state.take() {
+            Some(state) => (Some(state.offset), state.eof, state.last_line),
+            None => (None, 0, b"".to_vec()),
+        };
+        let data = if pos.is_some() {
+            if pos != Some(from+1) {
+                last_line.clear();
+                println!("[.. skipped ..]");
+                &data
+            } else {
+                &data[1..]
+            }
+        } else {
+            &data
+        };
+        let (last_line, end) = match data.iter().rposition(|&x| x == b'\n') {
+            Some(end) => (data[end+1..].to_vec(), end+1),
+            None => ({last_line.extend(data); last_line}, 0)
+        };
+        cur.state = Some(State {
+            eof: if to+1 == total { eof + 1 } else { 0 },
+            offset: to+1,
+            last_line: last_line,
+            last_request: Instant::now(),
+        });
+        io::stdout().write_all(&data[..end]).unwrap();
+        io::stdout().flush().unwrap();
+        Ok(Async::Ready(consumed))
     }
 }
 
@@ -210,7 +343,5 @@ fn spawn_updater<S: Sink<SinkItem=Request>>(sink: S, urls: Vec<Arc<Url>>)
     where S::SinkError: fmt::Display,
           S: 'static,
 {
-    spawn(sink.sink_map_err(|e| error!("Sink Error: {}", e))
-        .send_all(Requests::new(urls))
-        .map(|_| {}));
+    spawn(Forwarder::new(Requests::new(urls), sink));
 }

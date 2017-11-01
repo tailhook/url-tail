@@ -16,6 +16,7 @@ extern crate url;
 #[cfg(feature="tls_rustls")] extern crate tokio_rustls;
 
 mod fetch;
+mod forwarder;
 
 use std::env;
 use std::sync::Arc;
