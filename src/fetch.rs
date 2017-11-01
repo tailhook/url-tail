@@ -205,8 +205,7 @@ fn request(cur: &Arc<Mutex<Cursor>>) -> Result<Request, Instant> {
                 });
             }
             let next = state.last_request +
-                Duration::from_millis(
-                    min(100 * (2 << min(state.eof, 10)), 15000));
+                Duration::from_millis(100 * min(state.eof as u64, 70));
             if next < Instant::now() {
                 return Ok(Request {
                     cursor: cur.clone(),
@@ -335,7 +334,7 @@ impl<S> Codec<S> for Request {
             None => ({last_line.extend(data); last_line}, 0)
         };
         cur.state = Some(State {
-            eof: if to+1 == total { eof + 1 } else { 0 },
+            eof: if to+1 == total { eof.saturating_add(1) } else { 0 },
             offset: to+1,
             last_line: last_line,
             last_request: Instant::now(),
