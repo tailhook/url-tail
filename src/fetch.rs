@@ -6,6 +6,7 @@ use std::net::SocketAddr;
 use std::str::from_utf8;
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, Duration};
+use std::u64;
 
 use abstract_ns::Address;
 use futures::{Sink, Async, Stream};
@@ -292,10 +293,14 @@ impl<S> Codec<S> for Request {
                     .expect("valid content-range header");
                 let from = str_value[6..dash].parse::<u64>()
                     .expect("valid content-range header");
-                let to = str_value[dash+1..slash].parse::<u64>()
+                let mut to = str_value[dash+1..slash].parse::<u64>()
                     .expect("valid content-range header");
                 let total = str_value[slash+1..].parse::<u64>()
                     .expect("valid content-range header");
+                // bug in cantal :(
+                if to == u64::MAX {
+                    to = 0;
+                }
                 self.range = Some((from, to, total));
             }
         }
@@ -317,8 +322,10 @@ impl<S> Codec<S> for Request {
                 last_line.clear();
                 println!("[.. skipped ..]");
                 &data
-            } else {
+            } else if data.len() > 0 {
                 &data[1..]
+            } else {
+                &data
             }
         } else {
             &data
