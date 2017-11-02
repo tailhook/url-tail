@@ -353,7 +353,9 @@ impl<S> Codec<S> for Request {
             None => ({last_line.extend(data); last_line}, 0)
         };
         cur.state = Some(State {
-            eof: if to+1 == total { eof.saturating_add(1) } else { 0 },
+            eof: if to+1 == total {
+                    if data.len() > 0 { 1 } else { eof.saturating_add(1) }
+                } else { 0 },
             offset: to+1,
             last_line: last_line,
             last_request: Instant::now(),
