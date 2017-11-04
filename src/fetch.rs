@@ -294,7 +294,10 @@ impl<S> Codec<S> for Request {
     fn headers_received(&mut self, headers: &Head) -> Result<RecvMode, Error> {
         let status = headers.status();
         // TODO(tailhook) better error
-        assert_eq!(Some(Status::PartialContent), status);
+        if status != Some(Status::PartialContent) {
+            return Err(Error::custom(
+                format!("Server returned invalid status: {:?}", status)));
+        }
         for (name, value) in headers.headers() {
             if name == "Content-Range" {
                 let str_value = from_utf8(value)
