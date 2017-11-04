@@ -1,7 +1,6 @@
 use std::io::{self, Write};
 use std::cmp::min;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::fmt;
 use std::net::SocketAddr;
 use std::str::from_utf8;
 use std::sync::{Arc, Mutex};
@@ -25,8 +24,6 @@ use ns_router::Router;
 #[cfg(feature="tls_native")] use tokio_tls::TlsConnectorExt;
 #[cfg(feature="tls_rustls")] use rustls::ClientConfig;
 #[cfg(feature="tls_rustls")] use tokio_rustls::ClientConfigExt;
-
-use forwarder::Forwarder;
 
 
 #[derive(Debug)]
@@ -97,10 +94,17 @@ pub fn http(resolver: &Router, urls_by_host: HashMap<String, Vec<Arc<Url>>>) {
             for (ip, urls) in map {
                 let cfg = cfg.clone();
                 spawn(
-                    TcpStream::connect(&ip, &handle()).map(move |sock| {
-                        spawn_updater(Proto::new(sock, &handle(), &cfg), urls)
-                    }).map_err(move |e| {
+                    TcpStream::connect(&ip, &handle())
+                    .map_err(move |e| {
                         error!("Error connecting to {}: {}", ip, e);
+                    })
+                    .and_then(move |sock| {
+                        Proto::new(sock, &handle(), &cfg)
+                        .send_all(Requests::new(urls))
+                        .map(|_| unreachable!())
+                        .map_err(move |e| {
+                            error!("Error (ip: {}): {}", ip, e);
+                        })
                     }));
             }
         }));
@@ -141,10 +145,16 @@ pub fn https(resolver: &Router, urls_by_host: HashMap<String, Vec<Arc<Url>>>) {
                             io::Error::new(io::ErrorKind::Other, e)
                         })
                     })
-                    .map(move |sock| {
-                        spawn_updater(Proto::new(sock, &handle(), &cfg), urls)
-                    }).map_err(move |e| {
+                    .map_err(move |e| {
                         error!("Error connecting to {}: {}", ip, e);
+                    })
+                    .and_then(move |sock| {
+                        Proto::new(sock, &handle(), &cfg)
+                        .send_all(Requests::new(urls))
+                        .map(|_| unreachable!())
+                        .map_err(move |e| {
+                            error!("Error (ip: {}): {}", ip, e);
+                        })
                     }));
             }
         }));
@@ -181,10 +191,16 @@ pub fn https(resolver: &Router, urls_by_host: HashMap<String, Vec<Arc<Url>>>) {
                 spawn(
                     TcpStream::connect(&ip, &handle())
                     .and_then(move |sock| tls.connect_async(&host, sock))
-                    .map(move |sock| {
-                        spawn_updater(Proto::new(sock, &handle(), &cfg), urls)
-                    }).map_err(move |e| {
+                    .map_err(move |e| {
                         error!("Error connecting to {}: {}", ip, e);
+                    })
+                    .and_then(move |sock| {
+                        Proto::new(sock, &handle(), &cfg)
+                        .send_all(Requests::new(urls))
+                        .map(|_| unreachable!())
+                        .map_err(move |e| {
+                            error!("Error (ip: {}): {}", ip, e);
+                        })
                     }));
             }
         }));
@@ -231,8 +247,8 @@ impl Requests {
 
 impl Stream for Requests {
     type Item = Request;
-    type Error = ();
-    fn poll(&mut self) -> Result<Async<Option<Request>>, ()> {
+    type Error = Error;
+    fn poll(&mut self) -> Result<Async<Option<Request>>, Error> {
         loop {
             match self.timeout.poll().unwrap() {
                 Async::Ready(()) => {}
@@ -343,11 +359,4 @@ impl<S> Codec<S> for Request {
         io::stdout().flush().unwrap();
         Ok(Async::Ready(consumed))
     }
-}
-
-fn spawn_updater<S: Sink<SinkItem=Request>>(sink: S, urls: Vec<Arc<Url>>)
-    where S::SinkError: fmt::Display,
-          S: 'static,
-{
-    spawn(Forwarder::new(Requests::new(urls), sink));
 }
