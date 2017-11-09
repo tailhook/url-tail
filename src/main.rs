@@ -14,6 +14,7 @@ extern crate url;
 #[cfg(feature="tls_native")] extern crate tokio_tls;
 #[cfg(feature="tls_rustls")] extern crate rustls;
 #[cfg(feature="tls_rustls")] extern crate tokio_rustls;
+#[cfg(feature="tls_rustls")] extern crate webpki_roots;
 
 mod fetch;
 

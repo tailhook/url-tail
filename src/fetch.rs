@@ -24,6 +24,7 @@ use ns_router::Router;
 #[cfg(feature="tls_native")] use tokio_tls::TlsConnectorExt;
 #[cfg(feature="tls_rustls")] use rustls::ClientConfig;
 #[cfg(feature="tls_rustls")] use tokio_rustls::ClientConfigExt;
+#[cfg(feature="tls_rustls")] use webpki_roots;
 
 
 #[derive(Debug)]
@@ -77,6 +78,13 @@ pub fn group_addrs(vec: Vec<(Address, Vec<Arc<Url>>)>)
         active_ips.insert(*ip, urls);
     }
     return active_ips;
+}
+
+pub fn tls_host(host: &str) -> &str {
+    match host.find(':') {
+        Some(x) => &host[..x],
+        None => host,
+    }
 }
 
 pub fn http(resolver: &Router, urls_by_host: HashMap<String, Vec<Arc<Url>>>) {
@@ -141,7 +149,7 @@ pub fn https(resolver: &Router, urls_by_host: HashMap<String, Vec<Arc<Url>>>) {
                 spawn(
                     TcpStream::connect(&ip, &handle())
                     .and_then(move |sock| {
-                        cx.connect_async(&host, sock).map_err(|e| {
+                        cx.connect_async(tls_host(&host), sock).map_err(|e| {
                             io::Error::new(io::ErrorKind::Other, e)
                         })
                     })
@@ -171,10 +179,21 @@ pub fn https(resolver: &Router, urls_by_host: HashMap<String, Vec<Arc<Url>>>) {
     let resolver = resolver.clone();
     let tls = Arc::new({
         let mut cfg = ClientConfig::new();
-        let mut pem = BufReader::new(
-            File::open("/etc/ssl/certs/ca-certificates.crt")
-            .expect("certificates exist"));
-        cfg.root_store.add_pem_file(&mut pem).unwrap();
+        let read_root = File::open("/etc/ssl/certs/ca-certificates.crt")
+            .map_err(|e| format!("{}", e))
+            .and_then(|f|
+                cfg.root_store.add_pem_file(&mut BufReader::new(f))
+                .map_err(|()| format!("unrecognized format")));
+        match read_root {
+            Ok((_, _)) => {}  // TODO(tailhook) log numbers
+            Err(e) => {
+                warn!("Can find root certificates at {:?}: {}. \
+                    Using embedded ones.",
+                    "/etc/ssl/certs/ca-certificates.crt", e);
+            }
+        }
+        cfg.root_store.add_server_trust_anchors(
+            &webpki_roots::TLS_SERVER_ROOTS);
         cfg
     });
     let cfg = Config::new().done();
@@ -190,7 +209,9 @@ pub fn https(resolver: &Router, urls_by_host: HashMap<String, Vec<Arc<Url>>>) {
                 let tls = tls.clone();
                 spawn(
                     TcpStream::connect(&ip, &handle())
-                    .and_then(move |sock| tls.connect_async(&host, sock))
+                    .and_then(move |sock| {
+                        tls.connect_async(tls_host(&host), sock)
+                    })
                     .map_err(move |e| {
                         error!("Error connecting to {}: {}", ip, e);
                     })
