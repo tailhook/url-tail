@@ -1,0 +1,62 @@
+language: rust
+rust: stable
+os: linux
+dist: trusty
+sudo: false
+addons:
+  apt:
+    packages:
+    - fakeroot
+    - musl-tools
+
+cache:
+- apt
+- cargo
+
+before_cache:
+- rm -r $TRAVIS_BUILD_DIR/target/debug
+
+script:
+- cargo build $CARGO_ARGS
+- cargo test $CARGO_ARGS
+
+jobs:
+  include:
+  - rust: stable
+  - rust: beta
+  - rust: nightly
+
+  # deploy
+  - stage: deploy
+    install:
+    - rustup target add x86_64-unknown-linux-musl
+    script: |
+      mkdir -p dist
+      cargo build --target=x86_64-unknown-linux-musl --release --no-default-features --features=tls_rustls
+      fakeroot sh -ecx '
+        install -D target/x86_64-unknown-linux-musl/release/url-tail pkg/usr/bin/url-tail
+        tar -C pkg -czf dist/url-tail-static-$TRAVIS_TAG.tar.gz usr
+      '
+    deploy:
+      provider: releases
+      api_key:
+        secure: "efaAH8Tj/o/pDAqSvoawou0CWvXpMonldvdvZECkBFtpxnJQiR97S1S6dFvEJcGgxPbxUKwMsCY8UFLybWFXKgQfok/LBIoyxD5q5yb/Mde4dgp0GrBlPq8h+KIMUsj5TmQ3fFlyvPZhYmM2l/XvLwzUpPHEZ8ywlvb9c+QNUADCsz41MElRouQ2KGQW/ZNQ7ypqfH6mPXRMNQIT0kg9FzHmCy3gTLDpcApJx6Nv6LcON5hBiDgu+8OjdGMhsXaXX1+1a033zffgmCnRiAwiaVge7qIHmC+CyATj+a1+/iKAyw3lH7xFhLEB1RKATQE+q2KR2IGKD/+fuhuUs1FrCkpfeEGT7F3n7kqNVQlAtBGgoCZ/oaQelKukybHQBsED1H3fSptFZLggsMwDy7PTehzdVsnvTk0YGXfLPydT3xX6b8JnXZWxsWHHSzD0xHDkzbZlHVT2qXfLrJguscTeFVMEmpjM0rCfu0spq5tLR6k2SO5x4LqSuCB4baslHYvoiskbKCGDXYeUHzWdd5g+5GI1m8q1zTvXWkr/htEpL8TeJUVqxup2kjfM9NyJFdeJWOIwia3zURQcEUrB3hMEOxJV066qBi9xEB2ESB/8pnrSZ7TqhAYoVDWQvWjgVUh69MipFP3+jIW/QpHmnSa1zRQY0M4/H3aM18pbUI+rBM0="
+      file: "dist/url-tail-static-$TRAVIS_TAG.tar.gz"
+      skip_cleanup: true
+      on:
+        tags: true
+
+  - stage: deploy
+    os: linux
+    rust: stable
+    env:
+    # CARGO_TOKEN
+    - secure: "IAbIPlDf1BoZk32MXATVADN5sCNsvP2SWipqspW1iQViVRY932/logFnGl0va+9wNGXwvs9c3jEEmfoblXfAZfHNVx5CJk4rD7yE6zQAwjQmjwzRe2SqVCYUG78ZcQCdWGU6B1lpsOycftg0x9tTdFGrqbIo/LvKzlV6l0tjcuIIckHKU060KaHYkyUsuZFdz9INrzK33fACrZCK3Wz82UtucRztnB/s/UAEgwnDz0r7a1RIUyv6HzlVfESqTbXZb2wXF9ybAi79QiD2/oZD7ZGvpo8egwRgvJHlcvjPIzmK6SCcnI4OypdAWXq/N2INKWRLmzbkpYTlpPzMhaEicphi3V5MnPZAzrWNk36bffgAFepriIaw6/ByPu7PtaV9YdhJp7eOExFFmJcsKI9Qt44fndKJ8Ydh842esx5pGfPAwKF/wBC+ItOg7DOExyBUNISnNyywZUFzODdv5XbX3h0JxjgC9bxjozJaAl/tl5M6kCugFs/5dQ7E+44qiNTTw4sRDX43vDlmbPG9ZI4mPOEnQWclHTRGegr2ukHuvV1x9UQnoAn76165s2vT8B2zargqR61ykO14TJhIMAeiKl0LmhHtiAtRe1i/rHigQD+Tx5ZsbG+xg6UH7GHt9rX1HwSd9Cn9LlqKnMVwRFq1pqqmTBsiIthi1LSjBd3Bmyk="
+    install: true
+    script: true
+
+    deploy:
+    - provider: script
+      script: 'cargo publish --verbose --token=$CARGO_TOKEN'
+      on:
+        tags: true
