@@ -12,7 +12,7 @@ use futures::{Sink, Async, Stream};
 use futures::future::{Future, join_all, ok, FutureResult};
 use tokio_core::net::TcpStream;
 use tokio_core::reactor::Timeout;
-use tk_easyloop::{spawn, handle, timeout_at};
+use tk_easyloop::{handle, timeout_at};
 use tk_http::{Version, Status};
 use tk_http::client::{Proto, Config, Error, Codec};
 use tk_http::client::{Encoder, EncoderDone, Head, RecvMode};
@@ -80,6 +80,7 @@ pub fn group_addrs(vec: Vec<(Address, Vec<Arc<Url>>)>)
     return active_ips;
 }
 
+#[allow(dead_code)]
 pub fn tls_host(host: &str) -> &str {
     match host.find(':') {
         Some(x) => &host[..x],
@@ -87,22 +88,24 @@ pub fn tls_host(host: &str) -> &str {
     }
 }
 
-pub fn http(resolver: &Router, urls_by_host: HashMap<String, Vec<Arc<Url>>>) {
+pub fn http(resolver: &Router, urls_by_host: HashMap<String, Vec<Arc<Url>>>)
+    -> Box<Future<Item=(), Error=()>>
+{
     let resolver = resolver.clone();
     let cfg = Config::new()
         .keep_alive_timeout(Duration::new(25, 0))
         .done();
-    spawn(
+    return Box::new(
         join_all(urls_by_host.into_iter().map(move |(host, list)| {
+            let h1 = host.clone();
             resolver.resolve_auto(&host, 80).map(|ips| (ips, list))
+            .map_err(move |e| error!("Error resolving {:?}: {}", h1, e))
         }))
-        .map_err(|e| error!("Error resolving: {}", e))
         .map(group_addrs)
-        .map(move |map| {
-            for (ip, urls) in map {
+        .and_then(move |map| {
+            join_all(map.into_iter().map(move |(ip, urls)| {
                 let cfg = cfg.clone();
-                spawn(
-                    TcpStream::connect(&ip, &handle())
+                TcpStream::connect(&ip, &handle())
                     .map_err(move |e| {
                         error!("Error connecting to {}: {}", ip, e);
                     })
@@ -113,41 +116,48 @@ pub fn http(resolver: &Router, urls_by_host: HashMap<String, Vec<Arc<Url>>>) {
                         .map_err(move |e| {
                             error!("Error (ip: {}): {}", ip, e);
                         })
-                    }));
-            }
+                    })
+            }))
+            .map(|_| ())
         }));
 }
 #[cfg(not(any(feature="tls_native", feature="tls_rustls")))]
 pub fn https(_resolver: &Router, urls_by_host: HashMap<String, Vec<Arc<Url>>>)
+    -> Box<Future<Item=(), Error=()>>
 {
+    use futures::future::err;
     if urls_by_host.len() > 0 {
         eprintln!("Compiled without TLS support");
+        return Box::new(err(()));
     }
+    return Box::new(ok(()));
 }
 
 #[cfg(feature="tls_native")]
-pub fn https(resolver: &Router, urls_by_host: HashMap<String, Vec<Arc<Url>>>) {
+pub fn https(resolver: &Router, urls_by_host: HashMap<String, Vec<Arc<Url>>>)
+    -> Box<Future<Item=(), Error=()>>
+{
     use std::io;
 
     if urls_by_host.len() == 0 {
-        return;
+        return Box::new(ok(()));
     }
     let resolver = resolver.clone();
     let cfg = Config::new().done();
     let cx = TlsConnector::builder().expect("tls builder can be created works")
         .build().expect("tls builder works");
-    spawn(
+    return Box::new(
         join_all(urls_by_host.into_iter().map(move |(host, list)| {
+            let h1 = host.clone();
             resolver.resolve_auto(&host, 80).map(|addr| (host, addr, list))
+            .map_err(move |e| error!("Error resolving {:?}: {}", h1, e))
         }))
-        .map_err(|e| error!("Error resolving: {}", e))
-        .map(move |map| {
-            for (host, addr, urls) in map {
-                let ip = addr.pick_one().expect("no ips");
+        .and_then(move |map| {
+            join_all(map.into_iter().map(move |(host, addr, urls)| {
+                let ip = addr.pick_one().expect("no IPs");
                 let cfg = cfg.clone();
                 let cx = cx.clone();
-                spawn(
-                    TcpStream::connect(&ip, &handle())
+                TcpStream::connect(&ip, &handle())
                     .and_then(move |sock| {
                         cx.connect_async(tls_host(&host), sock).map_err(|e| {
                             io::Error::new(io::ErrorKind::Other, e)
@@ -163,18 +173,21 @@ pub fn https(resolver: &Router, urls_by_host: HashMap<String, Vec<Arc<Url>>>) {
                         .map_err(move |e| {
                             error!("Error (ip: {}): {}", ip, e);
                         })
-                    }));
-            }
+                    })
+            }))
+            .map(|_| ())
         }));
 }
 
 #[cfg(feature="tls_rustls")]
-pub fn https(resolver: &Router, urls_by_host: HashMap<String, Vec<Arc<Url>>>) {
+pub fn https(resolver: &Router, urls_by_host: HashMap<String, Vec<Arc<Url>>>)
+    -> Box<Future<Item=(), Error=()>>
+{
     use std::io::BufReader;
     use std::fs::File;
 
     if urls_by_host.len() == 0 {
-        return;
+        return Box::new(ok(()));
     }
     let resolver = resolver.clone();
     let tls = Arc::new({
@@ -197,18 +210,17 @@ pub fn https(resolver: &Router, urls_by_host: HashMap<String, Vec<Arc<Url>>>) {
         cfg
     });
     let cfg = Config::new().done();
-    spawn(
+    return Box::new(
         join_all(urls_by_host.into_iter().map(move |(host, list)| {
             resolver.resolve_auto(&host, 80).map(|addr| (host, addr, list))
         }))
         .map_err(|e| error!("Error resolving: {}", e))
-        .map(move |map| {
-            for (host, addr, urls) in map {
+        .and_then(move |map| {
+            join_all(map.into_iter().map(move |(host, addr, urls)| {
                 let ip = addr.pick_one().expect("no ips");
                 let cfg = cfg.clone();
                 let tls = tls.clone();
-                spawn(
-                    TcpStream::connect(&ip, &handle())
+                TcpStream::connect(&ip, &handle())
                     .and_then(move |sock| {
                         tls.connect_async(tls_host(&host), sock)
                     })
@@ -222,8 +234,9 @@ pub fn https(resolver: &Router, urls_by_host: HashMap<String, Vec<Arc<Url>>>) {
                         .map_err(move |e| {
                             error!("Error (ip: {}): {}", ip, e);
                         })
-                    }));
-            }
+                    })
+            }))
+            .map(|_| ())
         }));
 }
 

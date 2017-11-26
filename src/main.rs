@@ -18,7 +18,9 @@ extern crate url;
 
 mod fetch;
 
+use futures::Future;
 use std::env;
+use std::process::exit;
 use std::sync::Arc;
 use std::collections::HashMap;
 
@@ -37,7 +39,7 @@ fn main() {
 
     let options = options();
     let mut keep_resolver = None;
-    tk_easyloop::run_forever(|| {
+    tk_easyloop::run(|| {
         let resolver = resolver(&tk_easyloop::handle());
         keep_resolver = Some(resolver.clone());
         let mut http = HashMap::new();
@@ -64,10 +66,8 @@ fn main() {
                 }
             }
         }
-        fetch::http(&resolver, http);
-        fetch::https(&resolver, https);
-        Ok::<_, ()>(())
-    }).expect("main loop");
+        fetch::http(&resolver, http).join(fetch::https(&resolver, https))
+    }).map(|(_, _)| exit(1)).unwrap_or_else(|()| exit(1));
 }
 
 pub fn resolver(h: &Handle) -> ns_router::Router {
