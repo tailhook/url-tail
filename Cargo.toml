@@ -11,7 +11,7 @@ keywords = ["url", "fetch", "log", "tail"]
 categories = ["command-line-utilities"]
 homepage = "https://github.com/tailhook/url-tail"
 documentation = "https://github.com/tailhook/url-tail"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["paul@colomiets.name"]
 
 [dependencies]
